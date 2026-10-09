@@ -8,6 +8,8 @@ keep working. New code should import from the submodules directly, e.g.
 # Re-exported so ``patch("server.agent.AsyncOpenAI")`` in tests keeps working.
 from openai import AsyncOpenAI
 
+from .agent import AGENTS, Agent, get_agent, register
+from .context import AgentContext
 from .execute import execute_tool
 from .loop import agent_loop
 from .prompts import SYSTEM_PROMPT, _build_time_block, sse
@@ -25,14 +27,22 @@ from .tools import (
     SearchDocsArgs,
     TOOLS,
     TOOL_ARGS,
+    ToolDef,
     WRITE_TOOLS,
     WriteDocArgs,
     _check_md_path,
     _check_optional_path,
+    get_tools_list,
+    needs_confirm,
+    tool_schema,
 )
 from .validate import parse_since, validate_tool_call
 
 __all__ = [
+    # agent
+    "Agent", "AGENTS", "register", "get_agent",
+    # context
+    "AgentContext",
     # prompts
     "SYSTEM_PROMPT",
     "_build_time_block",
@@ -49,11 +59,15 @@ __all__ = [
     "GetRelatedDocsArgs",
     "RecentChangesArgs",
     "TOOL_ARGS",
+    "ToolDef",
     "TOOLS",
     "READ_TOOLS",
     "WRITE_TOOLS",
     "_check_md_path",
     "_check_optional_path",
+    "get_tools_list",
+    "needs_confirm",
+    "tool_schema",
     # validate
     "validate_tool_call",
     "parse_since",
@@ -64,3 +78,5 @@ __all__ = [
     # session
     "SessionManager",
 ]
+
+from . import agents  # noqa: F401 — triggers agent registration

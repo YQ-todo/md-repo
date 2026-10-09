@@ -259,6 +259,13 @@ def create_app(vault_dir: Path, db_conn, ai_config=None) -> FastAPI:
         session_id = body.get("session_id", "default")
         doc_path = body.get("doc_path", "")
 
+        agent_name = body.get("agent", "vault-assistant")
+
+        from .agent import get_agent
+        agent = get_agent(agent_name)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"unknown agent '{agent_name}'")
+
         session_mgr.cleanup()
         session = session_mgr.get_or_create(session_id)
         session["last_active"] = time.time()
@@ -277,7 +284,7 @@ def create_app(vault_dir: Path, db_conn, ai_config=None) -> FastAPI:
         lock = session_mgr.get_lock(session_id)
         await lock.acquire()
 
-        from .agent import TOOLS, agent_loop
+        from .agent import AgentContext, agent_loop
 
         async def event_generator():
             try:
@@ -303,18 +310,17 @@ def create_app(vault_dir: Path, db_conn, ai_config=None) -> FastAPI:
                 # user message append（在 lock 内）
                 session["messages"].append({"role": "user", "content": message})
 
-                async for event in agent_loop(
+                ctx = AgentContext(
+                    agent=agent,
                     messages=session["messages"],
-                    tools=TOOLS,
-                    ai_config=ai_config,
                     pending_confirms=session["pending_confirms"],
                     vault_dir=vault_dir,
                     db_conn=db_conn,
                     last_read_ts=session.setdefault("last_read_ts", {}),
-                    context_window=ai_config.context_window,
-                    max_rounds=ai_config.max_rounds,
-                    read_doc_max_chars=ai_config.read_doc_max_chars,
-                ):
+                    ai_config=ai_config,
+                )
+
+                async for event in agent_loop(ctx):
                     yield event
                 # Persist session after agent_loop completes
                 session_mgr.save(session_id)
