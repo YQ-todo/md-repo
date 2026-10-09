@@ -29,7 +29,6 @@ from .tools import (
     WriteDocArgs,
     _check_md_path,
     _check_optional_path,
-    _tool,
 )
 from .validate import parse_since, validate_tool_call
 
@@ -50,7 +49,6 @@ __all__ = [
     "GetRelatedDocsArgs",
     "RecentChangesArgs",
     "TOOL_ARGS",
-    "_tool",
     "TOOLS",
     "READ_TOOLS",
     "WRITE_TOOLS",

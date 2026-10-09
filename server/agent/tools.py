@@ -8,6 +8,9 @@ from __future__ import annotations
 import openai
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from dataclasses import dataclass
+from typing import Callable
+
 
 # ── Shared path validators ──────────────────────────────────────────────
 
@@ -135,28 +138,57 @@ class RecentChangesArgs(BaseModel):
     def validate_path(cls, v): return _check_optional_path(v)
 
 
-# ── Tool registry ───────────────────────────────────────────────────────
+# ── Tool definition ─────────────────────────────────────────────────────
 
-TOOL_ARGS: dict[str, type[BaseModel]] = {
-    "read_doc": ReadDocArgs,
-    "search_docs": SearchDocsArgs,
-    "list_files": ListFilesArgs,
-    "write_doc": WriteDocArgs,
-    "delete_doc": DeleteDocArgs,
-    "move_docs": MoveDocsArgs,
-    "edit_doc": EditDocArgs,
-    "get_related_docs": GetRelatedDocsArgs,
-    "recent_changes": RecentChangesArgs,
-}
+@dataclass
+class ToolDef:
+    """A tool's declaration: schema, confirm policy, and handler."""
+    name: str
+    args_model: type[BaseModel]
+    requires_confirm: bool = False
+    handler: Callable | None = None
 
 
-def _tool(model: type[BaseModel], name: str) -> dict:
-    t = openai.pydantic_function_tool(model, name=name)
+def tool_schema(name: str) -> dict:
+    """Generate the OpenAI function-calling schema for a tool."""
+    t = openai.pydantic_function_tool(TOOLS[name].args_model, name=name)
     t["function"].pop("strict", None)
     return t
 
 
-TOOLS = [_tool(TOOL_ARGS[name], name) for name in TOOL_ARGS]
+def needs_confirm(tool_name: str, agent) -> bool:
+    """Determine if a tool call requires user confirmation under this agent."""
+    tool = TOOLS.get(tool_name)
+    if tool is None:
+        return False
+    return tool.requires_confirm and tool_name not in agent.auto_tools
 
-READ_TOOLS = {"read_doc", "search_docs", "list_files", "get_related_docs", "recent_changes"}
-WRITE_TOOLS = {"write_doc", "edit_doc", "delete_doc", "move_docs"}
+
+# ── Tool registry ───────────────────────────────────────────────────────
+
+TOOLS: dict[str, ToolDef] = {
+    "read_doc": ToolDef("read_doc", ReadDocArgs, requires_confirm=False),
+    "search_docs": ToolDef("search_docs", SearchDocsArgs, requires_confirm=False),
+    "list_files": ToolDef("list_files", ListFilesArgs, requires_confirm=False),
+    "get_related_docs": ToolDef("get_related_docs", GetRelatedDocsArgs, requires_confirm=False),
+    "recent_changes": ToolDef("recent_changes", RecentChangesArgs, requires_confirm=False),
+    "write_doc": ToolDef("write_doc", WriteDocArgs, requires_confirm=True),
+    "edit_doc": ToolDef("edit_doc", EditDocArgs, requires_confirm=True),
+    "delete_doc": ToolDef("delete_doc", DeleteDocArgs, requires_confirm=True),
+    "move_docs": ToolDef("move_docs", MoveDocsArgs, requires_confirm=True),
+}
+
+# Backward-compat: TOOL_ARGS for validate.py
+TOOL_ARGS: dict[str, type[BaseModel]] = {name: t.args_model for name, t in TOOLS.items()}
+
+
+def get_tools_list(names: list[str] | None = None) -> list[dict]:
+    """Generate the OpenAI tools param (list of function schemas)."""
+    if names is None:
+        return [tool_schema(n) for n in TOOLS]
+    return [tool_schema(n) for n in names if n in TOOLS]
+
+
+# Backward-compat: READ_TOOLS / WRITE_TOOLS (derived from requires_confirm)
+READ_TOOLS = {n for n, t in TOOLS.items() if not t.requires_confirm}
+WRITE_TOOLS = {n for n, t in TOOLS.items() if t.requires_confirm}

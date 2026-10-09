@@ -35,3 +35,70 @@ def test_agent_registry_overwrite():
     register(a1)
     register(a2)
     assert get_agent("dup").system_prompt == "second"
+
+
+def test_tooldef_requires_confirm():
+    from server.agent.tools import TOOLS
+
+    assert TOOLS["read_doc"].requires_confirm is False
+    assert TOOLS["write_doc"].requires_confirm is True
+    assert TOOLS["edit_doc"].requires_confirm is True
+    assert TOOLS["delete_doc"].requires_confirm is True
+    assert TOOLS["move_docs"].requires_confirm is True
+    assert TOOLS["search_docs"].requires_confirm is False
+    assert TOOLS["list_files"].requires_confirm is False
+
+
+def test_tools_dict_has_nine_entries():
+    from server.agent.tools import TOOLS
+
+    assert len(TOOLS) == 9
+    assert set(TOOLS.keys()) == {
+        "read_doc", "search_docs", "list_files",
+        "write_doc", "edit_doc", "delete_doc", "move_docs",
+        "get_related_docs", "recent_changes",
+    }
+
+
+def test_needs_confirm_with_agent():
+    from server.agent.tools import needs_confirm
+    from server.agent.agent import Agent
+
+    agent_default = Agent(name="a", system_prompt="p", tools=["write_doc"])
+    assert needs_confirm("write_doc", agent_default) is True
+
+    agent_auto = Agent(name="b", system_prompt="p", tools=["write_doc"], auto_tools={"write_doc"})
+    assert needs_confirm("write_doc", agent_auto) is False
+
+    # Read tools never need confirm regardless of auto_tools
+    assert needs_confirm("read_doc", agent_default) is False
+
+
+def test_tools_schema_generation():
+    """TOOLS dict entries can generate OpenAI function schema."""
+    from server.agent.tools import TOOLS, tool_schema
+
+    schema = tool_schema("read_doc")
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "read_doc"
+    assert "path" in schema["function"]["parameters"]["properties"]
+
+
+def test_get_tools_list():
+    from server.agent.tools import get_tools_list
+
+    all_schemas = get_tools_list()
+    assert len(all_schemas) == 9
+
+    subset = get_tools_list(["read_doc", "write_doc"])
+    assert len(subset) == 2
+    names = {s["function"]["name"] for s in subset}
+    assert names == {"read_doc", "write_doc"}
+
+
+def test_read_write_tools_derived():
+    from server.agent.tools import READ_TOOLS, WRITE_TOOLS
+
+    assert READ_TOOLS == {"read_doc", "search_docs", "list_files", "get_related_docs", "recent_changes"}
+    assert WRITE_TOOLS == {"write_doc", "edit_doc", "delete_doc", "move_docs"}
+    assert READ_TOOLS.isdisjoint(WRITE_TOOLS)
