@@ -102,3 +102,47 @@ def test_read_write_tools_derived():
     assert READ_TOOLS == {"read_doc", "search_docs", "list_files", "get_related_docs", "recent_changes"}
     assert WRITE_TOOLS == {"write_doc", "edit_doc", "delete_doc", "move_docs"}
     assert READ_TOOLS.isdisjoint(WRITE_TOOLS)
+
+
+def test_execute_tool_via_registry(tmp_path):
+    """execute_tool dispatches through TOOLS registry handler."""
+    from server.agent.execute import execute_tool
+    from server.agent.context import AgentContext
+    from server.agent.agent import Agent
+    from unittest.mock import MagicMock
+
+    vault = tmp_path / "vault"
+    notes = vault / "notes"
+    notes.mkdir(parents=True)
+    (notes / "test.md").write_bytes(b"# Hello")
+
+    agent = Agent(name="t", system_prompt="p", tools=["read_doc"])
+    ctx = AgentContext(
+        agent=agent,
+        messages=[],
+        pending_confirms={},
+        vault_dir=vault,
+        db_conn=None,
+        last_read_ts={},
+        ai_config=MagicMock(),
+    )
+
+    result = execute_tool("read_doc", {"path": "notes/test.md"}, ctx)
+    assert "# Hello" in result
+
+
+def test_execute_tool_unknown(tmp_path):
+    from server.agent.execute import execute_tool
+    from server.agent.context import AgentContext
+    from server.agent.agent import Agent
+    from unittest.mock import MagicMock
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    agent = Agent(name="t", system_prompt="p", tools=[])
+    ctx = AgentContext(
+        agent=agent, messages=[], pending_confirms={},
+        vault_dir=vault, db_conn=None, last_read_ts={}, ai_config=MagicMock(),
+    )
+    result = execute_tool("nonexistent", {}, ctx)
+    assert "unknown tool" in result
