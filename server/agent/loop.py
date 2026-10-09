@@ -5,31 +5,33 @@ import asyncio
 import json
 import logging
 import time
-from pathlib import Path
 
 from openai import AsyncOpenAI
 
+from .context import AgentContext
 from .execute import execute_tool
 from .prompts import sse
-from .tools import WRITE_TOOLS
+from .tools import TOOLS, needs_confirm, get_tools_list
 from .validate import validate_tool_call
 
 logger = logging.getLogger("md-vault.agent")
 
 
-async def agent_loop(messages, tools, ai_config, pending_confirms, vault_dir, db_conn, last_read_ts=None, context_window: int = 16384, max_rounds: int = 15, read_doc_max_chars: int = 4000):
+async def agent_loop(ctx: AgentContext):
     """Core agent loop. Yields SSE events."""
-    client = AsyncOpenAI(base_url=ai_config.base_url, api_key=ai_config.api_key)
+    agent = ctx.agent
+    client = AsyncOpenAI(base_url=ctx.ai_config.base_url, api_key=ctx.ai_config.api_key)
+    tools = get_tools_list(agent.tools)
 
-    for _round in range(max_rounds):
+    for _round in range(agent.max_rounds):
         # In the last 3 rounds, inject a temporary reminder (not persisted to messages)
-        if _round >= max_rounds - 3:
-            call_messages = messages + [{"role": "system", "content": "You are approaching the round limit. Summarize your progress and provide a final answer."}]
+        if _round >= agent.max_rounds - 3:
+            call_messages = ctx.messages + [{"role": "system", "content": "You are approaching the round limit. Summarize your progress and provide a final answer."}]
         else:
-            call_messages = messages
+            call_messages = ctx.messages
 
         stream = await client.chat.completions.create(
-            model=ai_config.model,
+            model=ctx.ai_config.model,
             messages=call_messages,
             tools=tools if tools else None,
             stream=True,
@@ -63,7 +65,7 @@ async def agent_loop(messages, tools, ai_config, pending_confirms, vault_dir, db
                     if tc.function and tc.function.arguments:
                         acc["arguments"] += tc.function.arguments
 
-        # Emit token usage from the API response (prompt_tokens = current context size)
+        # Emit token usage from the API response
         if usage is not None:
             prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
             completion_tokens = getattr(usage, "completion_tokens", 0) or 0
@@ -71,16 +73,16 @@ async def agent_loop(messages, tools, ai_config, pending_confirms, vault_dir, db
                 current_tokens = prompt_tokens + completion_tokens
                 yield sse("token_usage", {
                     "used": current_tokens,
-                    "total": context_window,
-                    "percent": round(current_tokens / context_window * 100, 1) if context_window else 0,
+                    "total": agent.context_window,
+                    "percent": round(current_tokens / agent.context_window * 100, 1) if agent.context_window else 0,
                 })
 
         if not tool_calls:
-            messages.append({"role": "assistant", "content": content})
+            ctx.messages.append({"role": "assistant", "content": content})
             yield sse("done", {})
             return
 
-        messages.append({
+        ctx.messages.append({
             "role": "assistant",
             "content": content or None,
             "tool_calls": [
@@ -95,39 +97,39 @@ async def agent_loop(messages, tools, ai_config, pending_confirms, vault_dir, db
                 args = json.loads(tc["arguments"])
             except (json.JSONDecodeError, TypeError):
                 err_msg = "Error: malformed tool arguments"
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err_msg})
+                ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err_msg})
                 yield sse("tool_result", {"id": tc["id"], "result": err_msg, "error": True})
                 continue
 
             yield sse("tool_call", {"id": tc["id"], "name": tc["name"], "args": args})
             logger.info("tool_call %s args=%s", tc["name"], json.dumps(args, ensure_ascii=False))
 
-            error = validate_tool_call(tc["name"], args, vault_dir)
+            error = validate_tool_call(tc["name"], args, ctx.vault_dir, workspace=agent.workspace)
             if error:
                 logger.warning("tool_call %s rejected: %s", tc["name"], error)
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": error})
+                ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": error})
                 yield sse("tool_result", {"id": tc["id"], "result": error, "error": True})
                 continue
 
             # Pre-check existence for delete/move before asking user to confirm
             if tc["name"] == "delete_doc":
-                if not (vault_dir / args["path"]).is_file():
+                if not (ctx.vault_dir / args["path"]).is_file():
                     err = f"Error: file not found: {args['path']}"
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                    ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
                     yield sse("tool_result", {"id": tc["id"], "result": err, "error": True})
                     continue
             elif tc["name"] == "move_docs":
-                missing = [m["from_path"] for m in args.get("moves", []) if not (vault_dir / m["from_path"]).is_file()]
+                missing = [m["from_path"] for m in args.get("moves", []) if not (ctx.vault_dir / m["from_path"]).is_file()]
                 if missing:
                     err = f"Error: file(s) not found: {', '.join(missing)}"
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                    ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
                     yield sse("tool_result", {"id": tc["id"], "result": err, "error": True})
                     continue
 
-            logger.info("tool_call %s: in WRITE_TOOLS=%s", tc["name"], tc["name"] in WRITE_TOOLS)
-            if tc["name"] in WRITE_TOOLS:
+            logger.info("tool_call %s: needs_confirm=%s", tc["name"], needs_confirm(tc["name"], agent))
+            if needs_confirm(tc["name"], agent):
                 entry = {"event": asyncio.Event(), "approved": None}
-                pending_confirms[tc["id"]] = entry
+                ctx.pending_confirms[tc["id"]] = entry
                 confirm_sse = sse("confirm_request", {
                     "id": tc["id"], "name": tc["name"], "args": args,
                 })
@@ -136,22 +138,22 @@ async def agent_loop(messages, tools, ai_config, pending_confirms, vault_dir, db
                 logger.info("waiting for user confirmation on %s", tc["id"])
                 await entry["event"].wait()
                 logger.info("user confirmed/rejected %s, approved=%s", tc["id"], entry["approved"])
-                del pending_confirms[tc["id"]]
+                del ctx.pending_confirms[tc["id"]]
                 approved = entry["approved"]
                 if not approved:
                     result = "User rejected this operation."
                     logger.info("tool_call %s rejected by user", tc["name"])
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                    ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
                     yield sse("tool_result", {"id": tc["id"], "result": result, "rejected": True})
                     continue
 
-            result = execute_tool(tc["name"], args, vault_dir, db_conn, read_doc_max_chars=read_doc_max_chars)
+            result = execute_tool(tc["name"], args, ctx)
             logger.info("tool_result %s => %s", tc["name"], result[:500])
             yield sse("tool_result", {"id": tc["id"], "result": result})
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            ctx.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
-            # Track last read timestamp for change detection (P6)
+            # Track last read timestamp for change detection
             if tc["name"] == "read_doc" and not result.startswith("Error"):
                 path = args.get("path", "")
-                if path and last_read_ts is not None:
-                    last_read_ts[path] = time.time()
+                if path:
+                    ctx.last_read_ts[path] = time.time()

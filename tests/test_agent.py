@@ -6,6 +6,52 @@ from pathlib import Path
 import pytest
 
 from server.agent import execute_tool
+from unittest.mock import MagicMock
+
+
+def _make_ctx(vault_dir, db_conn=None, messages=None, pending_confirms=None, max_rounds=15):
+    """Build an AgentContext for testing."""
+    from server.agent.context import AgentContext
+    from server.agent.agent import Agent
+    from server.agent.tools import TOOLS as _TOOLS
+
+    agent = Agent(
+        name="test-agent",
+        system_prompt="You are a test agent.",
+        tools=list(_TOOLS.keys()),
+        max_rounds=max_rounds,
+    )
+    return AgentContext(
+        agent=agent,
+        messages=messages if messages is not None else [{"role": "user", "content": "hi"}],
+        pending_confirms=pending_confirms if pending_confirms is not None else {},
+        vault_dir=vault_dir,
+        db_conn=db_conn,
+        last_read_ts={},
+        ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
+    )
+
+
+def _make_exec_ctx(vault_dir, db_conn=None, read_doc_max_chars=4000):
+    """Build an AgentContext for execute_tool testing."""
+    from server.agent.context import AgentContext
+    from server.agent.agent import Agent
+
+    agent = Agent(
+        name="test-agent",
+        system_prompt="p",
+        tools=["read_doc", "search_docs", "list_files", "write_doc", "edit_doc", "delete_doc", "move_docs", "get_related_docs", "recent_changes"],
+        read_doc_max_chars=read_doc_max_chars,
+    )
+    return AgentContext(
+        agent=agent,
+        messages=[],
+        pending_confirms={},
+        vault_dir=vault_dir,
+        db_conn=db_conn,
+        last_read_ts={},
+        ai_config=MagicMock(),
+    )
 
 
 def test_validate_rejects_path_traversal(tmp_path: Path):
@@ -60,9 +106,8 @@ def test_validate_accepts_valid_path(tmp_path: Path):
 def test_tools_schema_has_nine_tools():
     from server.agent import TOOLS
 
-    names = {t["function"]["name"] for t in TOOLS}
-    assert len(names) == 9
-    assert names == {
+    assert len(TOOLS) == 9
+    assert set(TOOLS.keys()) == {
         "read_doc", "search_docs", "list_files",
         "write_doc", "edit_doc", "delete_doc", "move_docs",
         "get_related_docs", "recent_changes",
@@ -89,7 +134,7 @@ def test_execute_get_related_docs(vault_dir, db_conn):
     graph_extract_file(db_conn, vault_dir, "a.md")
     graph_extract_file(db_conn, vault_dir, "b.md")
 
-    result = execute_tool("get_related_docs", {"path": "a.md"}, vault_dir, db_conn)
+    result = execute_tool("get_related_docs", {"path": "a.md"}, _make_exec_ctx(vault_dir, db_conn=db_conn))
     assert "b.md" in result
 
 
@@ -104,7 +149,7 @@ def test_execute_read_doc(tmp_path: Path):
     notes.mkdir(parents=True)
     (notes / "test.md").write_bytes(b"# Hello\n\nWorld")
 
-    result = execute_tool("read_doc", {"path": "notes/test.md"}, vault, None)
+    result = execute_tool("read_doc", {"path": "notes/test.md"}, _make_exec_ctx(vault))
     assert "notes/test.md" in result
     assert "# Hello" in result
     assert "3 lines" in result
@@ -120,7 +165,7 @@ def test_execute_read_doc_offset_limit(tmp_path: Path):
 
     # Read lines 2-3
     result = execute_tool(
-        "read_doc", {"path": "notes/big.md", "offset": 2, "limit": 2}, vault, None
+        "read_doc", {"path": "notes/big.md", "offset": 2, "limit": 2}, _make_exec_ctx(vault)
     )
     assert "lines 2-3 of 5" in result
     assert "line2\nline3" in result
@@ -129,14 +174,14 @@ def test_execute_read_doc_offset_limit(tmp_path: Path):
 
     # Read from line 4 to end
     result = execute_tool(
-        "read_doc", {"path": "notes/big.md", "offset": 4}, vault, None
+        "read_doc", {"path": "notes/big.md", "offset": 4}, _make_exec_ctx(vault)
     )
     assert "lines 4-5 of 5" in result
     assert "line4\nline5" in result
 
     # Offset beyond file
     result = execute_tool(
-        "read_doc", {"path": "notes/big.md", "offset": 99}, vault, None
+        "read_doc", {"path": "notes/big.md", "offset": 99}, _make_exec_ctx(vault)
     )
     assert "Error" in result
     assert "exceeds" in result
@@ -152,7 +197,7 @@ def test_execute_read_doc_truncation(tmp_path: Path):
     lines = [f"line{i:03d} " + "x" * 42 + "\n" for i in range(1, 201)]
     (notes / "big.md").write_bytes("".join(lines).encode("utf-8"))
 
-    result = execute_tool("read_doc", {"path": "notes/big.md"}, vault, None)
+    result = execute_tool("read_doc", {"path": "notes/big.md"}, _make_exec_ctx(vault))
     assert "truncated" in result
     assert "more lines" in result
     assert "offset=" in result
@@ -168,7 +213,7 @@ def test_execute_read_doc_truncation(tmp_path: Path):
 
     # Continue reading from suggested offset
     result2 = execute_tool(
-        "read_doc", {"path": "notes/big.md", "offset": next_offset}, vault, None
+        "read_doc", {"path": "notes/big.md", "offset": next_offset}, _make_exec_ctx(vault)
     )
     assert "line200" in result2 or "truncated" in result2
 
@@ -181,7 +226,7 @@ def test_execute_read_doc_small_no_truncation(tmp_path: Path):
     notes.mkdir(parents=True)
     (notes / "small.md").write_bytes(b"hello\nworld\n")
 
-    result = execute_tool("read_doc", {"path": "notes/small.md"}, vault, None)
+    result = execute_tool("read_doc", {"path": "notes/small.md"}, _make_exec_ctx(vault))
     assert "truncated" not in result
     assert "hello\nworld" in result
 
@@ -191,7 +236,7 @@ def test_execute_read_doc_not_found(tmp_path: Path):
 
     vault = tmp_path / "vault"
     vault.mkdir()
-    result = execute_tool("read_doc", {"path": "missing.md"}, vault, None)
+    result = execute_tool("read_doc", {"path": "missing.md"}, _make_exec_ctx(vault))
     assert "not found" in result
 
 
@@ -201,7 +246,7 @@ def test_execute_write_doc(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()
     result = execute_tool(
-        "write_doc", {"path": "notes/new.md", "content": "# New Doc"}, vault, None
+        "write_doc", {"path": "notes/new.md", "content": "# New Doc"}, _make_exec_ctx(vault)
     )
     assert "Saved" in result
     fp = vault / "notes" / "new.md"
@@ -220,7 +265,7 @@ def test_execute_edit_doc(tmp_path: Path):
     result = execute_tool(
         "edit_doc",
         {"path": "notes/edit.md", "old_string": "Old text here.", "new_string": "New text here."},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "Edited" in result
     assert (notes / "edit.md").read_bytes() == b"# Title\n\nNew text here.\n"
@@ -237,7 +282,7 @@ def test_execute_edit_doc_not_found(tmp_path: Path):
     result = execute_tool(
         "edit_doc",
         {"path": "notes/edit.md", "old_string": "nonexistent", "new_string": "x"},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "Error" in result
 
@@ -253,7 +298,7 @@ def test_execute_edit_doc_multiple(tmp_path: Path):
     result = execute_tool(
         "edit_doc",
         {"path": "notes/edit.md", "old_string": "foo", "new_string": "baz"},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "Error" in result
     assert "2 times" in result
@@ -267,7 +312,7 @@ def test_execute_delete_doc(tmp_path: Path):
     notes.mkdir(parents=True)
     (notes / "del.md").write_bytes(b"content")
 
-    result = execute_tool("delete_doc", {"path": "notes/del.md"}, vault, None)
+    result = execute_tool("delete_doc", {"path": "notes/del.md"}, _make_exec_ctx(vault))
     assert "Deleted" in result
     assert not (vault / "notes" / "del.md").exists()
 
@@ -277,7 +322,7 @@ def test_execute_delete_doc_not_found(tmp_path: Path):
 
     vault = tmp_path / "vault"
     vault.mkdir()
-    result = execute_tool("delete_doc", {"path": "missing.md"}, vault, None)
+    result = execute_tool("delete_doc", {"path": "missing.md"}, _make_exec_ctx(vault))
     assert "not found" in result
 
 
@@ -297,7 +342,7 @@ def test_execute_move_docs_batch(tmp_path: Path):
             {"from_path": "b.md", "to_path": "sub/b.md"},
             {"from_path": "c.md", "to_path": "other/c.md"},
         ]},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "Moved 3 file(s)" in result
     assert not (vault / "a.md").exists()
@@ -319,7 +364,7 @@ def test_execute_move_docs_updates_references(tmp_path: Path):
     result = execute_tool(
         "move_docs",
         {"moves": [{"from_path": "old.md", "to_path": "new.md"}]},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "Moved 1 file(s)" in result
     # Reference should be updated in linker.md
@@ -342,7 +387,7 @@ def test_execute_move_docs_missing_source(tmp_path: Path):
             {"from_path": "a.md", "to_path": "sub/a.md"},
             {"from_path": "missing.md", "to_path": "sub/missing.md"},
         ]},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "not found" in result
     # No moves should have been performed
@@ -360,7 +405,7 @@ def test_execute_move_docs_dest_conflict(tmp_path: Path):
     result = execute_tool(
         "move_docs",
         {"moves": [{"from_path": "a.md", "to_path": "b.md"}]},
-        vault, None,
+        _make_exec_ctx(vault),
     )
     assert "already exists" in result
     # No move should have been performed
@@ -413,7 +458,7 @@ def test_execute_list_files(tmp_path: Path):
     (vault / ".sync").mkdir()
     (vault / ".sync" / "skip.md").write_bytes(b"skip")
 
-    result = execute_tool("list_files", {}, vault, None)
+    result = execute_tool("list_files", {}, _make_exec_ctx(vault))
     assert "notes/a.md" in result
     assert "notes/b.md" in result
     assert ".sync" not in result
@@ -428,12 +473,12 @@ def test_execute_search_docs(tmp_path: Path):
     (notes / "react.md").write_bytes(b"React component patterns")
     (notes / "vue.md").write_bytes(b"Vue reactivity system")
 
-    result = execute_tool("search_docs", {"query": "react"}, vault, None)
+    result = execute_tool("search_docs", {"query": "react"}, _make_exec_ctx(vault))
     assert "react.md" in result
 
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch  # noqa: F401 (MagicMock imported at top)
 
 
 def _make_chunk(content=None, tool_calls=None, finish_reason=None):
@@ -466,14 +511,7 @@ def test_agent_loop_no_tools(tmp_path: Path):
     with patch("server.agent.AsyncOpenAI", return_value=mock_client):
         events = list(
             asyncio.get_event_loop().run_until_complete(
-                _collect(agent_loop(
-                    messages=[{"role": "user", "content": "hi"}],
-                    tools=[],
-                    ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-                    pending_confirms={},
-                    vault_dir=vault,
-                    db_conn=None,
-                ))
+                _collect(agent_loop(_make_ctx(vault, messages=[{"role": "user", "content": "hi"}])))
             )
         )
 
@@ -504,14 +542,7 @@ def test_agent_loop_token_usage(tmp_path: Path):
     with patch("server.agent.AsyncOpenAI", return_value=mock_client):
         events = list(
             asyncio.get_event_loop().run_until_complete(
-                _collect(agent_loop(
-                    messages=[{"role": "user", "content": "hi"}],
-                    tools=[],
-                    ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-                    pending_confirms={},
-                    vault_dir=vault,
-                    db_conn=None,
-                ))
+                _collect(agent_loop(_make_ctx(vault, messages=[{"role": "user", "content": "hi"}])))
             )
         )
 
@@ -557,14 +588,7 @@ def test_agent_loop_with_tool_call(tmp_path: Path):
     with patch("server.agent.AsyncOpenAI", return_value=mock_client):
         events = list(
             asyncio.get_event_loop().run_until_complete(
-                _collect(agent_loop(
-                    messages=[{"role": "user", "content": "read test.md"}],
-                    tools=[],
-                    ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-                    pending_confirms={},
-                    vault_dir=vault,
-                    db_conn=None,
-                ))
+                _collect(agent_loop(_make_ctx(vault, messages=[{"role": "user", "content": "read test.md"}])))
             )
         )
 
@@ -602,17 +626,11 @@ def test_agent_loop_write_requires_confirm(tmp_path: Path):
     )
 
     pending = {}
+    ctx = _make_ctx(vault, pending_confirms=pending, messages=[{"role": "user", "content": "create new.md"}])
 
     async def run():
         events = []
-        async for event in agent_loop(
-            messages=[{"role": "user", "content": "create new.md"}],
-            tools=[],
-            ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-            pending_confirms=pending,
-            vault_dir=vault,
-            db_conn=None,
-        ):
+        async for event in agent_loop(ctx):
             events.append(event)
             if '"type": "confirm_request"' in event and "call_w" in event:
                 entry = pending["call_w"]
@@ -670,17 +688,11 @@ def test_agent_loop_confirm_no_stale_value(tmp_path: Path):
     )
 
     pending = {}  # new API: dict of tool_call_id -> {"event": Event, "approved": bool|None}
+    ctx = _make_ctx(vault, pending_confirms=pending, messages=[{"role": "user", "content": "write two files"}])
 
     async def run():
         events = []
-        async for event in agent_loop(
-            messages=[{"role": "user", "content": "write two files"}],
-            tools=[],
-            ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-            pending_confirms=pending,
-            vault_dir=vault,
-            db_conn=None,
-        ):
+        async for event in agent_loop(ctx):
             events.append(event)
             # After first confirm_request, simulate user approving call_1
             if '"type": "confirm_request"' in event and "call_1" in event:
@@ -746,17 +758,11 @@ def test_agent_loop_confirm_reject_by_id(tmp_path: Path):
     )
 
     pending = {}
+    ctx = _make_ctx(vault, pending_confirms=pending, messages=[{"role": "user", "content": "write r.md"}])
 
     async def run():
         events = []
-        async for event in agent_loop(
-            messages=[{"role": "user", "content": "write r.md"}],
-            tools=[],
-            ai_config=MagicMock(base_url="http://x", api_key="k", model="m"),
-            pending_confirms=pending,
-            vault_dir=vault,
-            db_conn=None,
-        ):
+        async for event in agent_loop(ctx):
             events.append(event)
             if '"type": "confirm_request"' in event and "call_r" in event:
                 entry = pending["call_r"]
@@ -838,7 +844,7 @@ def test_execute_recent_changes(tmp_path: Path):
     (vault / "notes" / "b.md").write_bytes(b"world")
     apply_change(conn, vault, "notes/b.md", "created", source="mcp")
 
-    result = execute_tool("recent_changes", {}, vault, conn)
+    result = execute_tool("recent_changes", {}, _make_exec_ctx(vault, db_conn=conn))
     assert "web" in result
     assert "agent" in result
     assert "mcp" in result
@@ -862,14 +868,14 @@ def test_execute_recent_changes_filter(tmp_path: Path):
 
     # Filter by path
     result = execute_tool(
-        "recent_changes", {"path": "notes/a.md"}, vault, conn
+        "recent_changes", {"path": "notes/a.md"}, _make_exec_ctx(vault, db_conn=conn)
     )
     assert "notes/a.md" in result
     assert "notes/b.md" not in result
 
     # Filter by source
     result = execute_tool(
-        "recent_changes", {"source": "agent"}, vault, conn
+        "recent_changes", {"source": "agent"}, _make_exec_ctx(vault, db_conn=conn)
     )
     assert "notes/b.md" in result
     assert "notes/a.md" not in result
@@ -883,7 +889,7 @@ def test_execute_recent_changes_empty(tmp_path: Path):
     vault.mkdir()
     conn = init_db(vault / ".sync" / "index.db")
 
-    result = execute_tool("recent_changes", {}, vault, conn)
+    result = execute_tool("recent_changes", {}, _make_exec_ctx(vault, db_conn=conn))
     assert "No recent changes" in result
 
 
@@ -892,7 +898,7 @@ def test_execute_recent_changes_no_db(tmp_path: Path):
 
     vault = tmp_path / "vault"
     vault.mkdir()
-    result = execute_tool("recent_changes", {}, vault, None)
+    result = execute_tool("recent_changes", {}, _make_exec_ctx(vault))
     assert "Error" in result
 
 
@@ -925,15 +931,7 @@ def test_agent_loop_max_rounds():
 
     async def run():
         events = []
-        async for event in agent_loop(
-            messages=[{"role": "user", "content": "test"}],
-            tools=None,
-            ai_config=ai_config,
-            pending_confirms={},
-            vault_dir=MagicMock(),
-            db_conn=None,
-            max_rounds=3,
-        ):
+        async for event in agent_loop(_make_ctx(MagicMock(), max_rounds=3, messages=[{"role": "user", "content": "test"}])):
             events.append(event)
         return events
 
@@ -981,15 +979,7 @@ def test_agent_loop_round_limit_reminder():
     ai_config.model = "test-model"
 
     async def run():
-        async for event in agent_loop(
-            messages=[{"role": "user", "content": "test"}],
-            tools=None,
-            ai_config=ai_config,
-            pending_confirms={},
-            vault_dir=MagicMock(),
-            db_conn=None,
-            max_rounds=5,
-        ):
+        async for event in agent_loop(_make_ctx(MagicMock(), max_rounds=5, messages=[{"role": "user", "content": "test"}])):
             pass
 
     with patch("server.agent.AsyncOpenAI", return_value=mock_client):
@@ -1012,7 +1002,7 @@ def test_read_doc_max_chars_truncation(vault_dir):
     test_file = vault_dir / "test_trunc.md"
     test_file.write_text("A" * 10000)
 
-    result = execute_tool("read_doc", {"path": "test_trunc.md"}, vault_dir, None, read_doc_max_chars=2000)
+    result = execute_tool("read_doc", {"path": "test_trunc.md"}, _make_exec_ctx(vault_dir, read_doc_max_chars=2000))
     # Should be truncated (content section should be ~2000 chars, not 10000)
     assert "truncated" in result.lower() or "[truncated" in result
 
@@ -1024,6 +1014,6 @@ def test_read_doc_max_chars_backward_compat(vault_dir):
     test_file = vault_dir / "test_compat.md"
     test_file.write_text("B" * 3000)
 
-    result = execute_tool("read_doc", {"path": "test_compat.md"}, vault_dir, None)
+    result = execute_tool("read_doc", {"path": "test_compat.md"}, _make_exec_ctx(vault_dir))
     # 3000 chars < 4000 default, so no truncation
     assert "truncated" not in result.lower()
