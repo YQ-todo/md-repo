@@ -11,7 +11,9 @@ from pydantic import ValidationError
 from .tools import TOOL_ARGS
 
 
-def validate_tool_call(name: str, args: dict, vault_dir: Path) -> str | None:
+def validate_tool_call(
+    name: str, args: dict, vault_dir: Path, workspace: str | None = None
+) -> str | None:
     """Validate args against the tool's Pydantic model + vault boundary check."""
     model = TOOL_ARGS.get(name)
     if model is None:
@@ -32,6 +34,21 @@ def validate_tool_call(name: str, args: dict, vault_dir: Path) -> str | None:
         full = (vault_dir / p).resolve()
         if not str(full).startswith(str(vault_dir.resolve())):
             return f"Error: path '{p}' resolves outside vault"
+    # workspace prefix check (top-level path args)
+    if workspace:
+        for key in ("path", "from_path", "to_path"):
+            p = args.get(key)
+            if p is None:
+                continue
+            if not p.startswith(workspace):
+                return f"Error: path '{p}' outside agent workspace '{workspace}'"
+    # workspace prefix check (move_docs: each item in moves list)
+    if workspace and "moves" in args:
+        for m in args["moves"]:
+            for key in ("from_path", "to_path"):
+                p = m.get(key)
+                if p is not None and not p.startswith(workspace):
+                    return f"Error: path '{p}' outside agent workspace '{workspace}'"
     return None
 
 
